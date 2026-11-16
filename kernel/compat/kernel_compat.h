@@ -398,6 +398,25 @@ __weak long copy_from_kernel_nofault(void *dst, const void *src, size_t size)
     return ret ? -EFAULT : 0;
 }
 #endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+__weak long copy_from_user_nofault(void *dst, const void __user *src, size_t size)
+{
+    long ret;
+    pagefault_disable();
+    ret = __copy_from_user_inatomic(dst, src, size);
+    pagefault_enable();
+    return ret ? -EFAULT : 0;
+}
+
+__weak long copy_to_user_nofault(void __user *dst, const void *src, size_t size)
+{
+    long ret;
+    pagefault_disable();
+    ret = __copy_to_user_inatomic(dst, src, size);
+    pagefault_enable();
+    return ret ? -EFAULT : 0;
+}
+#endif
 
 #ifndef __nocfi
 #define __nocfi

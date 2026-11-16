@@ -13,6 +13,7 @@ compile_commands.json
 *.symvers*
 *.order
 .*.cmd
+*.a
 .tmp_versions/
 libs/
 obj/

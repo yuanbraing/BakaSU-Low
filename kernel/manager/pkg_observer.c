@@ -10,6 +10,7 @@
 #include <linux/version.h>
 #include "klog.h" // IWYU pragma: keep
 #include "manager/throne_tracker.h"
+#include "../compat/kernel_compat.h"
 
 #define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
 
@@ -45,8 +46,13 @@ static void ksu_defer_track_throne(void)
         cb = kzalloc(sizeof(*cb), GFP_KERNEL);
         if (cb) {
             cb->func = ksu_track_throne_tw_func;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
             if (!task_work_add(current, cb, TWA_RESUME))
                 return;
+#else
+            if (!task_work_add(current, cb, true))
+                return;
+#endif
             kfree(cb);
         }
     }
@@ -54,22 +60,54 @@ static void ksu_defer_track_throne(void)
     track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS);
 }
 
-static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask, struct inode *inode, struct inode *dir,
-                                  const struct qstr *file_name, u32 cookie)
+// 核心检测逻辑：两个版本的回调共用
+static void ksu_check_event(u32 mask, const struct qstr *file_name)
 {
     if (!file_name)
-        return 0;
+        return;
     if (mask & FS_ISDIR)
-        return 0;
+        return;
     if (file_name->len == 13 && !memcmp(file_name->name, "packages.list", 13)) {
         pr_info("packages.list detected: %d\n", mask);
         ksu_defer_track_throne();
     }
-    return 0;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
+/*
+ * 5.4 的 handle_event 原型（见 fsnotify_backend.h）：
+ *   int (*handle_event)(struct fsnotify_group *group,
+ *                       struct inode *inode,
+ *                       u32 mask, const void *data, int data_type,
+ *                       const struct qstr *file_name, u32 cookie,
+ *                       struct fsnotify_iter_info *iter_info);
+ * 注意第二个参数是 inode（事件目标 inode），没有 dir 参数。
+ */
+static int ksu_handle_event(struct fsnotify_group *group, struct inode *inode,
+                            u32 mask, const void *data, int data_type,
+                            const struct qstr *file_name, u32 cookie,
+                            struct fsnotify_iter_info *iter_info)
+{
+    ksu_check_event(mask, file_name);
+    return 0;
+}
+#else
+/* 6.0+ 使用 handle_inode_event（原逻辑） */
+static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask,
+                                  struct inode *inode, struct inode *dir,
+                                  const struct qstr *file_name, u32 cookie)
+{
+    ksu_check_event(mask, file_name);
+    return 0;
+}
+#endif
+
 static const struct fsnotify_ops ksu_ops = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
+    .handle_event = ksu_handle_event,
+#else
     .handle_inode_event = ksu_handle_inode_event,
+#endif
 };
 
 static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark **out)
@@ -83,6 +121,12 @@ static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark
     fsnotify_init_mark(m, g);
     m->mask = mask;
 
+    /*
+     * 5.4 与 6.x 均为 3 参数：
+     *   fsnotify_add_inode_mark(struct fsnotify_mark *mark,
+     *                           struct inode *inode,
+     *                           int allow_dups)
+     */
     if (fsnotify_add_inode_mark(m, inode, 0)) {
         fsnotify_put_mark(m);
         return -EINVAL;
